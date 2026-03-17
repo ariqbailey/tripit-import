@@ -271,15 +271,31 @@ def domain_matches_header(from_value: str, domains: list[str]) -> bool:
 # imap
 # =========================
 
-def search_candidate_uids(imap_conn: imaplib.IMAP4_SSL, since_date: str) -> list[bytes]:
-    status, data = imap_conn.search(None, "SINCE", since_date)
+def search_candidate_uids(
+    imap_conn: imaplib.IMAP4_SSL,
+    since_date: str,
+    domains: list[str],
+) -> list[bytes]:
+    if not domains:
+        return []
+
+    if len(domains) == 1:
+        from_clause = f'FROM "{domains[0]}"'
+    else:
+        # right-fold into nested OR: OR FROM d1 (OR FROM d2 FROM d3)
+        from_clause = f'FROM "{domains[-1]}"'
+        for d in reversed(domains[:-1]):
+            from_clause = f'OR FROM "{d}" {from_clause}'
+
+    criteria = f'SINCE {since_date} {from_clause}'
+    status, data = imap_conn.uid('search', None, criteria.encode())
     if status != "OK":
-        raise RuntimeError("imap search failed")
+        raise RuntimeError(f"imap search failed: {data}")
     return data[0].split()
 
 
 def fetch_headers(imap_conn: imaplib.IMAP4_SSL, uid: bytes) -> email.message.Message | None:
-    status, data = imap_conn.fetch(uid, "(RFC822.HEADER)")
+    status, data = imap_conn.uid('fetch', uid, '(RFC822.HEADER)')
     if status != "OK":
         return None
     for item in data:
@@ -289,7 +305,7 @@ def fetch_headers(imap_conn: imaplib.IMAP4_SSL, uid: bytes) -> email.message.Mes
 
 
 def fetch_full_message(imap_conn: imaplib.IMAP4_SSL, uid: bytes) -> tuple[email.message.Message, bytes] | None:
-    status, data = imap_conn.fetch(uid, "(RFC822)")
+    status, data = imap_conn.uid('fetch', uid, '(BODY[])')
     if status != "OK":
         return None
     for item in data:
@@ -381,7 +397,7 @@ def main() -> None:
     imap_conn.login(icloud_email, icloud_password)
     imap_conn.select(MAILBOX)
 
-    all_uids = search_candidate_uids(imap_conn, args.since_date)
+    all_uids = search_candidate_uids(imap_conn, args.since_date, domains)
     if args.max_emails:
         all_uids = all_uids[: args.max_emails]
     print(f"found {len(all_uids)} total messages since {args.since_date}")
@@ -400,11 +416,6 @@ def main() -> None:
                 continue
 
             from_value = decode_header_value(header_msg.get("From", ""))
-            if not domain_matches_header(from_value, domains):
-                if args.debug:
-                    print(f"  [skip domain] uid={uid.decode()} from={from_value!r}")
-                continue
-
             msg_id = get_message_id(header_msg, uid)
             if msg_id in sent_ids:
                 if args.debug:
