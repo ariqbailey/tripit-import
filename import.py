@@ -11,6 +11,7 @@ import smtplib
 import ssl
 import sys
 import time
+from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -79,7 +80,6 @@ INCLUDE_DOMAINS = [
 # =========================
 
 SENT_IDS_FILE = Path("sent_ids.json")
-RESULTS_CSV_FILE = Path("results.csv")
 ENV_FILE = Path(".env")
 
 
@@ -170,21 +170,6 @@ def domain_matches(from_value: str, domains: list[str]) -> bool:
 def get_message_id(msg: email.message.Message, uid: bytes) -> str:
     raw = msg.get("Message-ID", "").strip()
     return raw if raw else f"uid:{uid.decode(errors='ignore')}"
-
-
-# =========================
-# filtering
-# =========================
-
-def should_forward(
-    msg: email.message.Message,
-    domains: list[str],
-) -> tuple[bool, str, str]:
-    """Returns (matched, stage, reason)."""
-    from_value = decode_header_value(msg.get("From", ""))
-    if not domain_matches(from_value, domains):
-        return False, "domain", "sender domain not in allowlist"
-    return True, "domain", "matched"
 
 
 # =========================
@@ -300,6 +285,11 @@ def main() -> None:
     args = parse_args()
     actually_send = args.send
 
+    results_dir = Path("results")
+    results_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    results_csv_file = results_dir / f"results_{timestamp}.csv"
+
     if args.reset_state:
         if SENT_IDS_FILE.exists():
             SENT_IDS_FILE.unlink()
@@ -322,10 +312,10 @@ def main() -> None:
         all_uids = all_uids[: args.max_emails]
     print(f"found {len(all_uids)} total messages since {args.since_date}")
 
-    # --- pass 1: fetch headers, domain check, dedupe ---
-    candidates: list[tuple[bytes, email.message.Message, str]] = []  # (uid, header_msg, msg_id)
+    queued: list[dict] = []
+    csv_rows: list[dict] = []
 
-    print("pass 1: scanning headers...")
+    print("scanning headers...")
     for i, uid in enumerate(all_uids, start=1):
         if i % 50 == 0 or i == len(all_uids):
             print(f"  [scanned {i} / {len(all_uids)}]")
@@ -337,43 +327,18 @@ def main() -> None:
 
             from_value = decode_header_value(header_msg.get("From", ""))
             msg_id = get_message_id(header_msg, uid)
+
             if msg_id in sent_ids:
                 if args.debug:
                     print(f"  [skip dedup] uid={uid.decode()} msg_id={msg_id!r}")
                 continue
 
-            candidates.append((uid, header_msg, msg_id))
-
-        except Exception as exc:
-            if args.debug:
-                print(f"  [error header] uid={uid.decode(errors='ignore')}: {exc}")
-
-    print(f"pass 1 done: {len(candidates)} candidates passed domain check and dedup")
-
-    # --- pass 2: fetch full messages, apply keyword filters ---
-    queued: list[dict] = []
-
-    print("pass 2: fetching full messages and applying keyword filters...")
-    csv_rows: list[dict] = []
-
-    for uid, header_msg, msg_id in candidates:
-        try:
-            result = fetch_full_message(imap_conn, uid)
-            if result is None:
+            if not domain_matches(from_value, domains):
                 continue
-            msg, raw_bytes = result
 
-            matched, stage, reason = should_forward(msg, domains)
+            subject = decode_header_value(header_msg.get("Subject", ""))
+            date_value = decode_header_value(header_msg.get("Date", ""))
 
-            from_value = decode_header_value(msg.get("From", ""))
-            subject = decode_header_value(msg.get("Subject", ""))
-            date_value = decode_header_value(msg.get("Date", ""))
-
-            if args.debug:
-                status = "MATCH" if matched else "skip"
-                print(f"  [{status}] stage={stage} reason={reason!r} | {from_value} | {subject}")
-
-            # extract domain from from_value for auditing
             sender_domain = ""
             from_lower = from_value.lower()
             at_idx = from_lower.rfind("@")
@@ -387,37 +352,44 @@ def main() -> None:
                 "from": from_value,
                 "sender_domain": sender_domain,
                 "subject": subject,
-                "matched": matched,
-                "stage": stage,
-                "reason": reason,
+                "matched": True,
+                "stage": "domain",
+                "reason": "matched",
             })
 
-            if matched:
-                queued.append({
-                    "msg_id": msg_id,
-                    "from": from_value,
-                    "subject": subject,
-                    "date": date_value,
-                    "raw_bytes": raw_bytes,
-                    "msg": msg,
-                })
+            if args.debug:
+                print(f"  [MATCH] {from_value} | {subject}")
+
+            if actually_send:
+                result = fetch_full_message(imap_conn, uid)
+                if result:
+                    msg, raw_bytes = result
+                    queued.append({
+                        "msg_id": msg_id,
+                        "from": from_value,
+                        "subject": subject,
+                        "date": date_value,
+                        "raw_bytes": raw_bytes,
+                        "msg": msg,
+                    })
 
         except Exception as exc:
             if args.debug:
-                print(f"  [error full] uid={uid.decode(errors='ignore')}: {exc}")
+                print(f"  [error] uid={uid.decode(errors='ignore')}: {exc}")
 
     imap_conn.logout()
 
-    with RESULTS_CSV_FILE.open("w", newline="") as csv_fh:
+    with results_csv_file.open("w", newline="") as csv_fh:
         writer = csv.DictWriter(csv_fh, fieldnames=["message_id", "date", "from", "sender_domain", "subject", "matched", "stage", "reason"])
         writer.writeheader()
         writer.writerows(csv_rows)
 
-    print(f"pass 2 done: {len(queued)} emails queued for forwarding")
-    print(f"results written to {RESULTS_CSV_FILE}")
+    print(f"scan done: {len(csv_rows)} matched, {len(queued)} queued for forwarding")
+    print(f"results written to {results_csv_file}")
 
     # preview
-    for i, item in enumerate(queued[:25], start=1):
+    preview_items = queued if actually_send else csv_rows
+    for i, item in enumerate(preview_items[:25], start=1):
         print(f"[preview {i}] {item['from']} | {item['subject']}")
 
     if not actually_send:
