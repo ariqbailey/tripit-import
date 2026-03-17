@@ -161,44 +161,10 @@ def decode_header_value(value: str) -> str:
     return "".join(out)
 
 
-def extract_text_from_message(msg: email.message.Message) -> str:
-    parts = []
-
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get("Content-Disposition", "")).lower()
-
-            if "attachment" in content_disposition:
-                continue
-
-            if content_type == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    parts.append(payload.decode(charset, errors="replace"))
-            elif content_type == "text/html":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    html = payload.decode(charset, errors="replace")
-                    parts.append(html)
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            charset = msg.get_content_charset() or "utf-8"
-            parts.append(payload.decode(charset, errors="replace"))
-
-    return "\n".join(parts).lower()
-
 
 def domain_matches(from_value: str, domains: list[str]) -> bool:
     from_lower = (from_value or "").lower()
     return any(domain in from_lower for domain in domains)
-
-
-def keyword_in_text(text: str, keywords: list[str]) -> bool:
-    return any(k in text for k in keywords)
 
 
 def get_message_id(msg: email.message.Message, uid: bytes) -> str:
@@ -216,25 +182,9 @@ def should_forward(
 ) -> tuple[bool, str, str]:
     """Returns (matched, stage, reason)."""
     from_value = decode_header_value(msg.get("From", ""))
-    subject = decode_header_value(msg.get("Subject", ""))
-    body_text = extract_text_from_message(msg)
-
-    haystack = f"{subject}\n{body_text}".lower()
-
     if not domain_matches(from_value, domains):
         return False, "domain", "sender domain not in allowlist"
-
-    if keyword_in_text(haystack, EXCLUDE_KEYWORDS):
-        return False, "exclude", "matched exclusion keyword"
-
-    if not keyword_in_text(haystack, INCLUDE_KEYWORDS):
-        return False, "include", "no inclusion keyword found"
-
-    return True, "include", "matched"
-
-
-def domain_matches_header(from_value: str, domains: list[str]) -> bool:
-    return domain_matches(from_value, domains)
+    return True, "domain", "matched"
 
 
 # =========================
@@ -423,10 +373,19 @@ def main() -> None:
                 status = "MATCH" if matched else "skip"
                 print(f"  [{status}] stage={stage} reason={reason!r} | {from_value} | {subject}")
 
+            # extract domain from from_value for auditing
+            sender_domain = ""
+            from_lower = from_value.lower()
+            at_idx = from_lower.rfind("@")
+            if at_idx != -1:
+                tail = from_lower[at_idx + 1:]
+                sender_domain = tail.split(">")[0].split()[0].strip()
+
             csv_rows.append({
                 "message_id": msg_id,
                 "date": date_value,
                 "from": from_value,
+                "sender_domain": sender_domain,
                 "subject": subject,
                 "matched": matched,
                 "stage": stage,
@@ -450,7 +409,7 @@ def main() -> None:
     imap_conn.logout()
 
     with RESULTS_CSV_FILE.open("w", newline="") as csv_fh:
-        writer = csv.DictWriter(csv_fh, fieldnames=["message_id", "date", "from", "subject", "matched", "stage", "reason"])
+        writer = csv.DictWriter(csv_fh, fieldnames=["message_id", "date", "from", "sender_domain", "subject", "matched", "stage", "reason"])
         writer.writeheader()
         writer.writerows(csv_rows)
 
