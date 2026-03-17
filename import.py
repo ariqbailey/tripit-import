@@ -307,6 +307,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def connect_smtp(host: str, port: int, email: str, password: str) -> smtplib.SMTP:
+    context = ssl.create_default_context()
+    smtp = smtplib.SMTP(host, port)
+    smtp.starttls(context=context)
+    smtp.login(email, password)
+    return smtp
+
+
 def main() -> None:
     args = parse_args()
     actually_send = args.send
@@ -428,26 +436,40 @@ def main() -> None:
 
     to_send = queued if not args.max_sends else queued[: args.max_sends]
     print(f"\nconnecting to icloud smtp to send {len(to_send)} emails...")
-    context = ssl.create_default_context()
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
-        smtp.starttls(context=context)
-        smtp.login(icloud_email, icloud_password)
+    smtp = connect_smtp(SMTP_HOST, SMTP_PORT, icloud_email, icloud_password)
 
-        sent_count = 0
-        for i, item in enumerate(to_send, start=1):
+    sent_count = 0
+    for i, item in enumerate(to_send, start=1):
+        try:
+            forward = build_forward_message(item["raw_bytes"], item["msg"], icloud_email)
+            smtp.send_message(forward)
+            save_sent_id(item["msg_id"])
+            sent_count += 1
+            print(f"[sent {sent_count} / {len(to_send)}] {item['from']} | {item['subject']}")
+        except Exception as exc:
+            print(f"[reconnecting after error: {exc}]")
             try:
-                forward = build_forward_message(item["raw_bytes"], item["msg"], icloud_email)
+                smtp.quit()
+            except Exception:
+                pass
+            try:
+                smtp = connect_smtp(SMTP_HOST, SMTP_PORT, icloud_email, icloud_password)
                 smtp.send_message(forward)
                 save_sent_id(item["msg_id"])
                 sent_count += 1
                 print(f"[sent {sent_count} / {len(to_send)}] {item['from']} | {item['subject']}")
-            except Exception as exc:
-                print(f"[error] failed to send {item['msg_id']!r}: {exc}")
+            except Exception as exc2:
+                print(f"[error] failed to send {item['msg_id']!r}: {exc2}")
 
-            if i % args.batch_size == 0:
-                print(f"[progress] {sent_count} sent so far...")
+        if i % args.batch_size == 0:
+            print(f"[progress] {sent_count} sent so far...")
 
-            time.sleep(args.delay)
+        time.sleep(args.delay)
+
+    try:
+        smtp.quit()
+    except Exception:
+        pass
 
     print(f"\ndone. sent {sent_count} / {len(to_send)}.")
 
