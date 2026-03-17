@@ -73,36 +73,6 @@ INCLUDE_DOMAINS = [
     "hopper.com",
 ]
 
-# subject/body signals that are usually good
-INCLUDE_KEYWORDS = [
-    "confirmation",
-    "itinerary",
-    "receipt",
-    "e-ticket",
-    "eticket",
-    "booking",
-    "reservation",
-    "trip confirmation",
-    "booking confirmation",
-]
-
-# strong negatives to avoid noise / duplicate operational emails
-EXCLUDE_KEYWORDS = [
-    "check-in",
-    "check in",
-    "boarding",
-    "gate",
-    "last call",
-    "upgrade",
-    "priority boarding",
-    "bag drop",
-    "delayed",
-    "delay",
-    "cancelled",
-    "canceled",
-    "flight status",
-    "reminder",
-]
 
 # =========================
 # state files
@@ -434,52 +404,55 @@ def main() -> None:
     queued: list[dict] = []
 
     print("pass 2: fetching full messages and applying keyword filters...")
+    csv_rows: list[dict] = []
+
+    for uid, header_msg, msg_id in candidates:
+        try:
+            result = fetch_full_message(imap_conn, uid)
+            if result is None:
+                continue
+            msg, raw_bytes = result
+
+            matched, stage, reason = should_forward(msg, domains)
+
+            from_value = decode_header_value(msg.get("From", ""))
+            subject = decode_header_value(msg.get("Subject", ""))
+            date_value = decode_header_value(msg.get("Date", ""))
+
+            if args.debug:
+                status = "MATCH" if matched else "skip"
+                print(f"  [{status}] stage={stage} reason={reason!r} | {from_value} | {subject}")
+
+            csv_rows.append({
+                "message_id": msg_id,
+                "date": date_value,
+                "from": from_value,
+                "subject": subject,
+                "matched": matched,
+                "stage": stage,
+                "reason": reason,
+            })
+
+            if matched:
+                queued.append({
+                    "msg_id": msg_id,
+                    "from": from_value,
+                    "subject": subject,
+                    "date": date_value,
+                    "raw_bytes": raw_bytes,
+                    "msg": msg,
+                })
+
+        except Exception as exc:
+            if args.debug:
+                print(f"  [error full] uid={uid.decode(errors='ignore')}: {exc}")
+
+    imap_conn.logout()
+
     with RESULTS_CSV_FILE.open("w", newline="") as csv_fh:
         writer = csv.DictWriter(csv_fh, fieldnames=["message_id", "date", "from", "subject", "matched", "stage", "reason"])
         writer.writeheader()
-
-        for uid, header_msg, msg_id in candidates:
-            try:
-                result = fetch_full_message(imap_conn, uid)
-                if result is None:
-                    continue
-                msg, raw_bytes = result
-
-                matched, stage, reason = should_forward(msg, domains)
-
-                from_value = decode_header_value(msg.get("From", ""))
-                subject = decode_header_value(msg.get("Subject", ""))
-                date_value = decode_header_value(msg.get("Date", ""))
-
-                if args.debug:
-                    status = "MATCH" if matched else "skip"
-                    print(f"  [{status}] stage={stage} reason={reason!r} | {from_value} | {subject}")
-
-                writer.writerow({
-                    "message_id": msg_id,
-                    "date": date_value,
-                    "from": from_value,
-                    "subject": subject,
-                    "matched": matched,
-                    "stage": stage,
-                    "reason": reason,
-                })
-
-                if matched:
-                    queued.append({
-                        "msg_id": msg_id,
-                        "from": from_value,
-                        "subject": subject,
-                        "date": date_value,
-                        "raw_bytes": raw_bytes,
-                        "msg": msg,
-                    })
-
-            except Exception as exc:
-                if args.debug:
-                    print(f"  [error full] uid={uid.decode(errors='ignore')}: {exc}")
-
-    imap_conn.logout()
+        writer.writerows(csv_rows)
 
     print(f"pass 2 done: {len(queued)} emails queued for forwarding")
     print(f"results written to {RESULTS_CSV_FILE}")
