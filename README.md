@@ -23,19 +23,19 @@ Bulk-forward travel confirmation emails from iCloud Mail to TripIt.
 
 ```bash
 # dry run: preview matches, write results/<timestamp>.csv, nothing sent
-python import.py --dry-run --since-date "01-Jan-2024" --max-emails 100 --debug
+python3 import.py --dry-run --since-date "01-Jan-2024" --max-emails 100 --debug
 
 # inspect output
 open results/
 
 # small live test: send up to 5 emails
-python import.py --send --max-sends 5 --delay 2
+python3 import.py --send --max-sends 5 --delay 2
 
 # run again — already-sent emails are skipped automatically
-python import.py --send
+python3 import.py --send
 
 # clear dedup state and start fresh
-python import.py --reset-state --dry-run
+python3 import.py --reset-state --dry-run
 ```
 
 ## CLI flags
