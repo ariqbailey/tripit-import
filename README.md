@@ -16,19 +16,17 @@ Bulk-forward travel confirmation emails from iCloud Mail to TripIt.
    ICLOUD_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
    ```
 
-2. **Configure domains and keywords** in `import.py` if needed:
+2. **Configure domains** in `import.py` if needed:
    - `INCLUDE_DOMAINS` — sender domains to consider
-   - `INCLUDE_KEYWORDS` — subject/body must contain at least one
-   - `EXCLUDE_KEYWORDS` — subject/body must not contain any
 
 ## Quick start
 
 ```bash
-# dry run: preview matches, write results.csv, nothing sent
+# dry run: preview matches, write results/<timestamp>.csv, nothing sent
 python import.py --dry-run --since-date "01-Jan-2024" --max-emails 100 --debug
 
 # inspect output
-open results.csv
+open results/
 
 # small live test: send up to 5 emails
 python import.py --send --max-sends 5 --delay 2
@@ -64,7 +62,7 @@ Each processed email's `Message-ID` header (or IMAP UID as fallback) is stored i
 | File | Description |
 |------|-------------|
 | `sent_ids.json` | Auto-created; set of forwarded message IDs |
-| `results.csv` | Written every run; one row per candidate email with filter outcome |
+| `results/<timestamp>.csv` | Written each run to the `results/` folder; filename includes run timestamp |
 | `.env` | You create; stores credentials (never commit this) |
 
-`results.csv` columns: `message_id, date, from, subject, matched, stage, reason`
+`results/<timestamp>.csv` columns: `message_id, date, from, sender_domain, subject, matched, stage, reason`
